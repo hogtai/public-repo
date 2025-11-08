@@ -11,12 +11,14 @@ from collections import defaultdict
 # GitLab project details
 # For each Gitlab Project you want to analyze, add its project ID to the PROJECT_IDS list
 GITLAB_URL = "https://gitlab.com"
-PROJECT_IDS = [
-    "PROJECT_ID_1",  # GITLAB PROJECT 1
-    "PROJECT_ID_2",  # GITLAB PROJECT 2
-    "PROJECT_ID_3"   # GITLAB PROJECT 3
-]
-ACCESS_TOKEN = "GLPAT_TOKEN"  # Replace with your GitLab access token
+PROJECT_IDS = [pid.strip() for pid in os.environ.get("GITLAB_PROJECT_IDS", "").split(',') if pid.strip()]
+if not PROJECT_IDS:
+    logging.error("No GitLab project IDs found. Please set the GITLAB_PROJECT_IDS environment variable.")
+    sys.exit(1)
+ACCESS_TOKEN = os.environ.get("GITLAB_ACCESS_TOKEN")
+if not ACCESS_TOKEN:
+    logging.error("GitLab access token not found. Please set the GITLAB_ACCESS_TOKEN environment variable.")
+    sys.exit(1)
 
 # Pass the GL PAT as a Headers for the API requests
 headers = {

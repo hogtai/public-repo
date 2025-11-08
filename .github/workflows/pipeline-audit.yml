@@ -1,11 +1,9 @@
 name: GitLab Pipeline Performance Audit
 
 on:
-  push:
-    branches:
-      - main
-    paths:
-      - 'python-scripts/gitlab/pipeline-performance-multiple-projects-test.py'
+  workflow_dispatch: # Allows manual triggering from the GitHub UI
+  schedule:
+    - cron: '0 0 1-7 * 5' # Runs at 00:00 UTC on the first Friday of every month
 
 jobs:
   run-audit:
@@ -37,3 +35,43 @@ jobs:
       with:
         name: pipeline-audit-results
         path: pipeline_audit_results_*.zip
+
+    - name: Send success email
+      if: success()
+      uses: dawidd6/action-send-mail@v3
+      with:
+        server_address: ${{ secrets.MAIL_SERVER }}
+        server_port: 587
+        username: ${{ secrets.MAIL_USERNAME }}
+        password: ${{ secrets.MAIL_PASSWORD }}
+        subject: 'GitHub Actions Workflow Success: GitLab Pipeline Performance Audit'
+        body: |
+          The GitLab Pipeline Performance Audit workflow completed successfully!
+
+          Repository: ${{ github.repository }}
+          Branch: ${{ github.ref_name }}
+          Workflow Run: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+
+          You can download the artifact from the workflow run page.
+        to: hogtai@gmail.com
+        from: GitHub Actions <action@github.com>
+
+    - name: Send failure email
+      if: failure()
+      uses: dawidd6/action-send-mail@v3
+      with:
+        server_address: ${{ secrets.MAIL_SERVER }}
+        server_port: 587
+        username: ${{ secrets.MAIL_USERNAME }}
+        password: ${{ secrets.MAIL_PASSWORD }}
+        subject: 'GitHub Actions Workflow Failure: GitLab Pipeline Performance Audit'
+        body: |
+          The GitLab Pipeline Performance Audit workflow failed!
+
+          Repository: ${{ github.repository }}
+          Branch: ${{ github.ref_name }}
+          Workflow Run: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+
+          Please check the workflow run for details.
+        to: hogtai@gmail.com
+        from: GitHub Actions <action@github.com>
