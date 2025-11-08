@@ -1,0 +1,39 @@
+name: GitLab Pipeline Performance Audit
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - 'python-scripts/gitlab/pipeline-performance-test.py'
+
+jobs:
+  run-audit:
+    runs-on: ubuntu-latest
+
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v3
+
+    - name: Set up Python
+      uses: actions/setup-python@v4
+      with:
+        python-version: '3.x'
+
+    - name: Install dependencies
+      run: |
+        python -m pip install --upgrade pip
+        pip install requests
+
+    - name: Run pipeline performance script
+      env:
+        GITLAB_PROJECT_IDS: ${{ secrets.GITLAB_PROJECT_IDS }}
+        GITLAB_ACCESS_TOKEN: ${{ secrets.GITLAB_ACCESS_TOKEN }}
+      run: |
+        python python-scripts/gitlab/pipeline-performance-test.py
+
+    - name: Upload pipeline audit results
+      uses: actions/upload-artifact@v3
+      with:
+        name: pipeline-audit-results
+        path: pipeline_audit_results_*.zip
