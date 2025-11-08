@@ -33,7 +33,7 @@ jobs:
         python python-scripts/gitlab/pipeline-performance-multiple-projects-test.py
 
     - name: Upload pipeline audit results
-      uses: actions/upload-artifact@v3
+      uses: actions/upload-artifact@v4
       with:
         name: pipeline-audit-results
         path: pipeline_audit_results_*.zip

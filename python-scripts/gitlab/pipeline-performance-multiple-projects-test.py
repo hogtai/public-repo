@@ -7,7 +7,7 @@ import shutil
 import zipfile
 from datetime import datetime, timedelta
 from collections import defaultdict
-# Init test
+
 # GitLab project details
 # For each Gitlab Project you want to analyze, add its project ID to the PROJECT_IDS list
 GITLAB_URL = "https://gitlab.com"
