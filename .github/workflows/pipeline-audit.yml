@@ -5,7 +5,7 @@ on:
     branches:
       - main
     paths:
-      - 'python-scripts/gitlab/pipeline-performance-test.py'
+      - 'python-scripts/gitlab/pipeline-performance-multiple-projects-test.py'
 
 jobs:
   run-audit:
@@ -30,7 +30,7 @@ jobs:
         GITLAB_PROJECT_IDS: ${{ secrets.GITLAB_PROJECT_IDS }}
         GITLAB_ACCESS_TOKEN: ${{ secrets.GITLAB_ACCESS_TOKEN }}
       run: |
-        python python-scripts/gitlab/pipeline-performance-test.py
+        python python-scripts/gitlab/pipeline-performance-multiple-projects-test.py
 
     - name: Upload pipeline audit results
       uses: actions/upload-artifact@v3
