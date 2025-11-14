@@ -47,6 +47,7 @@ jobs:
 
       - name: Install dependencies
         run: |
+          set -euo pipefail
           python -m pip install --upgrade pip
           pip install requests
 
@@ -55,9 +56,20 @@ jobs:
           GITLAB_PROJECT_IDS: ${{ secrets.GITLAB_PROJECT_IDS }}
           GITLAB_ACCESS_TOKEN: ${{ secrets.GITLAB_ACCESS_TOKEN }}
         run: |
-          python python-scripts/gitlab/pipeline-performance-multiple-projects-test.py
+          set -euo pipefail
+
+          # Run the script and capture output
+          python python-scripts/gitlab/pipeline-performance-multiple-projects-test.py 2>&1 | tee script.log
+
+          # If the script logged any ERROR lines, treat this step as a failure.
+          # You can tighten/loosen this pattern if needed.
+          if grep -q "ERROR:" script.log; then
+            echo "One or more ERROR lines were detected in script output. Failing step."
+            exit 1
+          fi
 
       - name: Upload pipeline audit results
+        # This will be skipped if the previous step fails
         uses: actions/upload-artifact@v4
         with:
           name: pipeline-audit-results
@@ -84,6 +96,7 @@ jobs:
           from: GitHub Actions <action@github.com>
 
       - name: Send failure email
+        # This will run iff any previous step in the job failed
         if: failure()
         uses: dawidd6/action-send-mail@v3
         with:
@@ -100,5 +113,5 @@ jobs:
             Workflow Run: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
 
             Please check the workflow run for details.
-          to: hogtai@gmail.com
+          to: ${{ secrets.EMAIL }}
           from: GitHub Actions <action@github.com>
