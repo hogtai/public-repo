@@ -1,0 +1,11 @@
+flask
+requests
+google-cloud-secret-manager
+python-gitlab
+google-cloud-aiplatform
+vertexai
+google-cloud-logging
+google-cloud-tasks
+setuptools
+python-dotenv
+gunicorn

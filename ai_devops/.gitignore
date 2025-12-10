@@ -1,0 +1,13 @@
+# Ignore the virtual environment directory
+.venv/
+
+# Ignore VS Code settings
+.vscode/
+
+#
+__pycache__/
+
+.env
+
+.gcloudignore
+*.code-workspace

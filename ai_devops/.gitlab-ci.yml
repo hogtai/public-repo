@@ -1,0 +1,108 @@
+# Use Google Cloud SDK image for gcloud commands
+image: google/cloud-sdk:latest
+
+include:
+  - project: 'lifechurch/io/digital-product/sre/cicd-tools/kaniko'
+    file: '/templates/ci-build-image.gitlab-ci.yml'
+    ref: 'main' 
+
+stages:
+  - build
+  - setup_infra
+  - deploy
+
+variables:
+  # --- User Defined Variables (Ensure these are set in GitLab CI/CD Settings) ---
+  GCP_PROJECT_ID: "digital-product-sre" # Set in GitLab CI/CD Variables
+  PROJECT_ID: ${GCP_PROJECT_ID}
+  SERVICE_NAME: "code-analyzer" # Name for Cloud Run service
+  REGION: "us-central1"
+  IMAGE_NAME: "gcr.io/${GCP_PROJECT_ID}/${SERVICE_NAME}" # Image name with commit SHA tag
+  CLOUD_TASKS_QUEUE_NAME: "code-analyzer" # Name for the Cloud Tasks queue
+  # Construct the full queue path (used by the application)
+  CLOUD_TASKS_QUEUE_PATH: "projects/${GCP_PROJECT_ID}/locations/${REGION}/queues/${CLOUD_TASKS_QUEUE_NAME}"
+  # Service account email for the Cloud Run service (used for task authentication)
+  # IMPORTANT: Verify this in GCP IAM or Cloud Run service details after first deploy.
+  SERVICE_ACCOUNT_EMAIL: "${SERVICE_NAME}@${GCP_PROJECT_ID}.iam.gserviceaccount.com" # Adjust if your service account email differs
+
+
+
+before_script:
+  # Authenticate gcloud
+  - echo "Authenticating gcloud..."
+  - echo $GCP_SERVICE_ACCOUNT_KEY > gcp-key.json
+  - gcloud auth activate-service-account --key-file=gcp-key.json
+  - gcloud config set project ${GCP_PROJECT_ID}
+  - gcloud config set compute/region ${REGION}
+  - echo "gcloud authenticated for project ${GCP_PROJECT_ID} in region ${REGION}"
+
+build:
+  stage: build
+  before_script:
+    - echo "Skip"
+  extends:
+    - .kaniko_build_image
+  only:
+    - main
+  tags:
+    - rock-rms
+
+create_cloud_tasks_queue:
+  stage: setup_infra
+  script:
+    # Use simple list items for script commands
+    - echo "Attempting to create Cloud Tasks queue - ${CLOUD_TASKS_QUEUE_NAME} in region ${REGION}..." # Changed colon to hyphen
+    # Attempt to create; ignore error if it already exists using || true
+    - gcloud tasks queues create "${CLOUD_TASKS_QUEUE_NAME}" --location="${REGION}" --project="${GCP_PROJECT_ID}" || true
+    - echo "Queue creation attempt finished for ${CLOUD_TASKS_QUEUE_NAME}."
+  only:
+    - main # Or your deployment branch
+  tags:
+    - rock-rms
+
+deploy_cloud_run:
+  stage: deploy
+  needs: [build, create_cloud_tasks_queue] # Ensure build and queue setup are done first
+  script:
+    # Use simple list items for script commands
+    - echo "Deploying Cloud Run service ${SERVICE_NAME} with image ${IMAGE_NAME}..."
+    # Deploy the Cloud Run service - Use multi-line block scalar for readability
+    # Pass each environment variable separately for clarity
+    # NOTE: Ensure GITLAB_TOKEN and WEBHOOK_SECRET are defined in GitLab CI/CD Variables.
+    - >
+      gcloud run deploy "${SERVICE_NAME}"
+      --image="${IMAGE_NAME}"
+      --region="${REGION}"
+      --platform=managed
+      --allow-unauthenticated
+      --cpu=1
+      --memory=512Mi
+      --set-env-vars="GITLAB_PAT_SECRET_ID=${GITLAB_TOKEN}"
+      --set-env-vars="GITLAB_URL=${CI_SERVER_URL}"
+      --set-env-vars="GITLAB_WEBHOOK_SECRET_ID=${WEBHOOK_SECRET}"
+      --set-env-vars="PROJECT_ID=${GCP_PROJECT_ID}"
+      --set-env-vars="DEBUG_MODE=true"
+      --set-env-vars="CLOUD_TASKS_QUEUE_PATH=${CLOUD_TASKS_QUEUE_PATH}"
+      --set-env-vars="SERVICE_ACCOUNT_EMAIL=975726826206-compute@developer.gserviceaccount.com"
+      --project="${GCP_PROJECT_ID}"
+    # Get the Cloud Run service URL and print instructions
+    # Assign SERVICE_URL in a separate step
+    - SERVICE_URL=$(gcloud run services describe "${SERVICE_NAME}" --platform=managed --region="${REGION}" --format="value(status.url)")
+    - echo "----------------------------------------------------------------------"
+    - echo "Cloud Run Service Deployed - ${SERVICE_NAME}" # Changed colon to hyphen
+    - echo "Service URL - ${SERVICE_URL}" # Changed colon to hyphen
+    - echo ""
+    - echo "ACTION REQUIRED - Configure your GitLab webhook-" # Changed colon to hyphen
+    - echo "  URL - ${SERVICE_URL}/webhook" # Changed colon to hyphen
+    - echo "  Secret Token - Ensure it matches the value associated with the WEBHOOK_SECRET variable." # Changed colon to hyphen
+    - echo "  Trigger - Merge request events" # Changed colon to hyphen
+    - echo ""
+    - echo "Ensure the Cloud Run service account (${SERVICE_ACCOUNT_EMAIL}) has-" # Changed colon to hyphen
+    - echo "  - roles/cloudtasks.enqueuer permission on the project or queue."
+    - echo "  - roles/run.invoker permission (usually granted by default)."
+    - echo "  - Permissions for Vertex AI, GitLab API access (via PAT), etc."
+    - echo "----------------------------------------------------------------------"
+  only:
+    - main # Or your deployment branch
+  tags:
+    - rock-rms
