@@ -1,0 +1,100 @@
+include:
+  - project: 'lifechurch/io/digital-product/sre/cicd-tools/kaniko'
+    file: '/templates/ci-build-image.gitlab-ci.yml'
+    ref: 'main'
+
+stages:
+  - build
+  - tag
+
+Build Rock-RMS:
+  stage: build
+  variables:
+    PROJECT_ID: lc-management
+  extends:
+    - .kaniko_build_image
+  only:
+    - branches
+  tags:
+    - rock-rms
+
+Build Interactive:
+  stage: build
+  variables:
+    PROJECT_ID: lc-interactive
+  extends:
+    - .kaniko_build_image
+  only:
+    - branches
+  tags:
+    - int-staging
+
+Build Open:
+  stage: build
+  variables:
+    PROJECT_ID: open-network-site
+  extends:
+    - .kaniko_build_image
+  only:
+    - branches
+  tags:
+    - open-staging
+
+Build ChOP:
+  stage: build
+  variables:
+    PROJECT_ID: open-network-194320
+  extends:
+    - .kaniko_build_image
+  only:
+    - branches
+  tags:
+    - chop-staging
+
+Tag Rock-RMS:
+  stage: tag
+  rules:
+    - if: $CI_COMMIT_TAG
+  variables:
+    PROJECT_ID: lc-management
+    IMAGE_TAGS_ADDITIONAL: $CI_COMMIT_TAG
+  extends:
+    - .kaniko_build_image
+  tags:
+    - rock-rms
+
+Tag Interactive:
+  stage: tag
+  rules:
+    - if: $CI_COMMIT_TAG
+  variables:
+    PROJECT_ID: lc-interactive
+    IMAGE_TAGS_ADDITIONAL: $CI_COMMIT_TAG
+  extends:
+    - .kaniko_build_image
+  tags:
+    - int-staging
+
+Tag Open:
+  stage: tag
+  rules:
+    - if: $CI_COMMIT_TAG
+  variables:
+    PROJECT_ID: open-network-site
+    IMAGE_TAGS_ADDITIONAL: $CI_COMMIT_TAG
+  extends:
+    - .kaniko_build_image
+  tags:
+    - open-staging
+
+Tag ChOP:
+  stage: tag
+  rules:
+    - if: $CI_COMMIT_TAG
+  variables:
+    PROJECT_ID: open-network-194320
+    IMAGE_TAGS_ADDITIONAL: $CI_COMMIT_TAG
+  extends:
+    - .kaniko_build_image
+  tags:
+    - chop-staging
