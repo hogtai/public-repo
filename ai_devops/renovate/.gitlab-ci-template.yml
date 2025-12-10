@@ -1,0 +1,55 @@
+# Renovate Bot GitLab CI Template
+#
+# This template provides a reusable Renovate job configuration that can be
+# included in any GitLab project to automatically manage dependency updates.
+#
+# Usage:
+#   include:
+#     - project: 'lifechurch/io/digital-product/sre/cicd-tools/renovate'
+#       file: '/.gitlab-ci-template.yml'
+#       ref: 'main'
+#
+# Requirements:
+#   - A renovate.json configuration file in the project root
+#   - RENOVATE_BOT token configured in Doppler secrets
+#   - A scheduled pipeline configured in GitLab CI/CD settings
+#
+# Customization:
+#   Projects should define runner tags in their own .gitlab-ci.yml
+#   using either the 'default' section or by extending the renovate job:
+#
+#   Example 1 - Using default tags (applies to all jobs):
+#     default:
+#       tags:
+#         - int-staging
+#
+#   Example 2 - Override the renovate job:
+#     renovate:
+#       tags:
+#         - int-staging
+
+include:
+  - project: 'lifechurch/io/digital-product/sre/cicd-tools/doppler'
+    file: '/.gitlab-ci.template.yml'
+    ref: 'main'
+
+stages:
+    - secret
+    - renovate
+
+renovate:
+  dependencies: [secret]
+  stage: renovate
+  image:
+    name: renovate/renovate:latest
+    entrypoint: [""]
+  before_script:
+    - source ./bash.env
+    - echo "Running Renovate Bot for project ${CI_PROJECT_PATH}"
+  script:
+    - renovate --platform gitlab --token ${RENOVATE_BOT} ${CI_PROJECT_PATH}
+  rules:
+    - if: '$CI_PIPELINE_SOURCE == "schedule"'
+      when: always
+    - when: never
+  allow_failure: true
