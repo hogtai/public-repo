@@ -1,0 +1,234 @@
+.doppler_scripts:
+  use_env_file:
+    - |
+      if [ -f "bash.env" ]; then
+        echo "Found bash.env file. Using it to set Variables"
+        source $CI_PROJECT_DIR/bash.env
+      fi
+  delete_feature_config:
+    - |
+      echo "🔑 Authenticating to Doppler..."
+      doppler configure set token "$DOPPLER_TOKEN" >/dev/null 2>&1 && echo "🔐 Successfully Authenticated to Doppler"
+
+      # Derive Doppler project and config
+      export DOPPLER_PROJECT=$(echo $CI_PROJECT_URL | sed 's/.*\/lifechurch\/io\/digital-product\///' | sed 's/\//-/g')
+      export DOPPLER_PROJECT="gitlab-$DOPPLER_PROJECT"
+      export DOPPLER_CONFIG="dev_${CI_COMMIT_REF_SLUG}"
+
+      echo "🧹 Attempting to delete Doppler config: $DOPPLER_CONFIG in project: $DOPPLER_PROJECT"
+
+      # Protect against deletion of core configs
+      if [ "$DOPPLER_CONFIG" = "dev" ] || [ "$DOPPLER_CONFIG" = "stg" ] || [ "$DOPPLER_CONFIG" = "prd" ]; then
+        echo "🚫 Skipping deletion of protected config: $DOPPLER_CONFIG"
+      else
+        echo "🧹 Deleting Doppler config: $DOPPLER_CONFIG in project: $DOPPLER_PROJECT"
+        doppler configs delete "$DOPPLER_CONFIG" --project "$DOPPLER_PROJECT" --yes
+
+        # ✅ Confirm deletion
+        doppler configs get --project "$DOPPLER_PROJECT" --config "$DOPPLER_CONFIG"  &> /dev/null \
+          && echo "⚠️ Config $DOPPLER_CONFIG still exists!" \
+          || echo "✅ Confirmed: $DOPPLER_CONFIG was deleted"
+      fi
+
+default:
+  before_script:
+    - !reference [.doppler_scripts, use_env_file]
+
+secret:
+  stage: secret
+  image: 
+    name: dopplerhq/cli:3
+    entrypoint: [""]
+  artifacts:
+    name: $CI_JOB_NAME-$CI_COMMIT_SHORT_SHA
+    untracked: false
+    when: always
+    expire_in: 1 day
+    access: 'developer'
+    paths:
+      - "bash.env"
+  before_script:
+    - echo "Forcibly Skipping Before Script"
+  script:
+    - | # Set Doppler Project / Config Vars
+      export DOPPLER_PROJECT=$(echo $CI_PROJECT_URL | sed 's/.*\/lifechurch\/io\/digital-product\///' | sed 's/\//-/g')
+      export DOPPLER_PROJECT=$(echo gitlab-$DOPPLER_PROJECT)
+    - | # Determine the Doppler Config to use
+      # Override CI_COMMIT_BRANCH if running in a merge request
+      if [ -n "$CI_MERGE_REQUEST_ID" ]; then
+          echo "Running in a merge request. Setting CI_COMMIT_BRANCH to $CI_MERGE_REQUEST_SOURCE_BRANCH_NAME"
+          CI_COMMIT_BRANCH="$CI_MERGE_REQUEST_SOURCE_BRANCH_NAME"
+      fi
+
+      # Determine DOPPLER_CONFIG based on CI_COMMIT_BRANCH
+      case "$CI_COMMIT_BRANCH" in
+          dev|develop|development|development-rock-rms|development-youversion|lifechurch/development)
+              DOPPLER_CONFIG="dev"
+              DOPPLER_PARENT_CONFIG=$DOPPLER_CONFIG
+              ;;
+          integration|staging|lifechurch/staging|staging-rock-rms|staging-youversion)
+              DOPPLER_CONFIG="stg"
+              DOPPLER_PARENT_CONFIG=$DOPPLER_CONFIG
+              ;;
+          main|master|lifechurch|production|production-rock-rms|production-youversion)
+              DOPPLER_CONFIG="prd"
+              DOPPLER_PARENT_CONFIG=$DOPPLER_CONFIG
+              ;;
+          *)
+              echo "Unknown branch: $CI_COMMIT_BRANCH"
+              echo "Setting Variables for review app"
+              DOPPLER_PARENT_CONFIG="dev"
+
+              # Generate config name with length limit check (Doppler max: 60 chars)
+              BASE_CONFIG="dev_$CI_COMMIT_REF_SLUG"
+
+              if [ ${#BASE_CONFIG} -gt 60 ]; then
+                  echo "⚠️  Branch name too long for Doppler config (${#BASE_CONFIG} > 60 chars)"
+                  # Generate a consistent hash from the branch name
+                  BRANCH_HASH=$(echo -n "$CI_COMMIT_REF_SLUG" | md5sum | cut -c1-8)
+                  # Truncate slug to fit: 60 - 4 (dev_) - 9 (hash + hyphen) = 47 chars
+                  TRUNCATED_SLUG=$(echo "$CI_COMMIT_REF_SLUG" | cut -c1-47)
+                  DOPPLER_CONFIG="dev_${TRUNCATED_SLUG}-${BRANCH_HASH}"
+                  echo "📝 Truncated config name: $DOPPLER_CONFIG (${#DOPPLER_CONFIG} chars)"
+                  echo "   Original branch: $CI_COMMIT_REF_SLUG"
+              else
+                  DOPPLER_CONFIG="$BASE_CONFIG"
+              fi
+
+              # Creates a new doppler config for a specific feature branch within the same doppler project
+              echo "Creating new Doppler config: $DOPPLER_CONFIG for project: $DOPPLER_PROJECT"
+              if doppler configs create $DOPPLER_CONFIG --project "$DOPPLER_PROJECT"; then
+                  echo "SUCCESS: Created Doppler config '$DOPPLER_CONFIG'"
+              else
+                  CREATE_EXIT_CODE=$?
+                  # Check if config already exists (acceptable failure)
+                  if doppler configs get $DOPPLER_CONFIG --project "$DOPPLER_PROJECT" >/dev/null 2>&1; then
+                      echo "INFO: Doppler config '$DOPPLER_CONFIG' already exists - continuing with existing config"
+                  else
+                      echo "ERROR: Failed to create Doppler config '$DOPPLER_CONFIG' (exit code: $CREATE_EXIT_CODE)"
+                      exit $CREATE_EXIT_CODE
+                  fi
+              fi
+              
+              # Verify the config exists
+              echo "Verifying Doppler config exists..."
+              if doppler configs get $DOPPLER_CONFIG --project "$DOPPLER_PROJECT" >/dev/null 2>&1; then
+                  echo "SUCCESS: Verified Doppler config '$DOPPLER_CONFIG' exists"
+              else
+                  echo "ERROR: Failed to verify Doppler config '$DOPPLER_CONFIG' exists"
+                  exit 1
+              fi
+
+              if [ -d "./kubernetes" ]; then
+                # Determine the parent project for KUBE_DOMAIN
+                PARENT_DOPPLER_PROJECT=$(doppler secrets get DOPPLER_PARENT --project "$DOPPLER_PROJECT" --config "$DOPPLER_PARENT_CONFIG" --plain 2>/dev/null || echo "")
+                if [ -z "$PARENT_DOPPLER_PROJECT" ]; then
+                    echo "Warning: Could not determine parent Doppler project to establish the for KUBE_DOMAIN needed for ingress config. Using current doppler project instead."
+                    PARENT_DOPPLER_PROJECT="$DOPPLER_PROJECT"
+                fi
+
+                # Fetch KUBE_DOMAIN from the parent config (not the new config that doesn't exist yet)
+                echo "Fetching KUBE_DOMAIN from parent config '$DOPPLER_PARENT_CONFIG'..."
+                export KUBE_DOMAIN=$(doppler secrets get KUBE_DOMAIN --project "$DOPPLER_PROJECT" --config "$DOPPLER_PARENT_CONFIG" --plain)
+                if [ -z "$KUBE_DOMAIN" ]; then
+                    echo "ERROR: Failed to fetch KUBE_DOMAIN from parent config '$DOPPLER_PARENT_CONFIG'"
+                    exit 1
+                fi
+                echo "SUCCESS: KUBE_DOMAIN fetched: $KUBE_DOMAIN"
+
+                INGRESS_HOSTNAME="$CI_COMMIT_REF_SLUG.$KUBE_DOMAIN"
+                echo "Setting INGRESS_HOSTNAME: $INGRESS_HOSTNAME for branch $CI_COMMIT_REF_SLUG"
+                
+                # Set secrets in the verified config
+                echo "Setting secrets in Doppler config '$DOPPLER_CONFIG'..."
+                if doppler secrets set \
+                  "INGRESS_HOSTNAME=$INGRESS_HOSTNAME" \
+                  "SECRET_APP_BASE_URL=https://$INGRESS_HOSTNAME" \
+                  --project "$DOPPLER_PROJECT" \
+                  --config "$DOPPLER_CONFIG"; then
+                    echo "SUCCESS: Set secrets in Doppler config '$DOPPLER_CONFIG'"
+                else
+                    SECRETS_EXIT_CODE=$?
+                    echo "ERROR: Failed to set secrets in Doppler config '$DOPPLER_CONFIG' (exit code: $SECRETS_EXIT_CODE)"
+                    exit $SECRETS_EXIT_CODE
+                fi
+              fi
+              ;;
+      esac
+
+      # Output the determined variable
+      echo "DOPPLER_CONFIG=$DOPPLER_CONFIG"
+      echo "INFO: DOPPLER_PARENT_CONFIG is: $DOPPLER_PARENT_CONFIG"
+  
+    # - | # Pull GitLab Variables
+    #   printenv | grep -e "^CI_" | sed "s/\(.*\)=\(.*\)/export \1='\2'/" >> bash.env
+    #   printenv | grep -e "^CI_" | sed "s/\(.*\)=\(.*\)/export \1='\2'/" >> bash.env
+    - | # Pull vars from Doppler
+      #!/bin/sh
+
+      # set -e  # Exit on errors
+      # set -x  # Enable verbose debugging
+
+      SECRET_NAME=DOPPLER_PARENT
+      INITIAL_PROJECT="$DOPPLER_PROJECT"
+      echo "INFO: INITIAL_PROJECT: $INITIAL_PROJECT"
+      PROJECTS_FILE=$(mktemp)
+
+      # Install Dependencies
+      apk update >/dev/null
+      apk add jq >/dev/null
+
+      # Add the initial project to the list. This file will store projects from initial up to top-most parent.
+      echo "$INITIAL_PROJECT" > "$PROJECTS_FILE" # Create/overwrite with initial project
+
+      # Traverse through the hierarchy to find PARENT projects
+      # Start traversal from the initial project to find its parents
+      TEMP_PROJECT_FOR_TRAVERSAL="$INITIAL_PROJECT"
+      while true; do
+          echo "Looking for parent of project: $TEMP_PROJECT_FOR_TRAVERSAL using config '$DOPPLER_PARENT_CONFIG' to find secret '$SECRET_NAME'"
+          
+          # Use DOPPLER_PARENT_CONFIG to find the *name* of the parent project
+          # This secret should contain the name of the next project in the hierarchy
+          PARENT_PROJECT_NAME=$(doppler secrets get --project "$TEMP_PROJECT_FOR_TRAVERSAL" --config "$DOPPLER_PARENT_CONFIG" "$SECRET_NAME" --plain 2>/dev/null || echo "")
+
+          if [ -z "$PARENT_PROJECT_NAME" ]; then
+              echo "No further parent project found for: $TEMP_PROJECT_FOR_TRAVERSAL (secret '$SECRET_NAME' not found or empty). Reached top of hierarchy."
+              break
+          fi
+
+          # Add found parent project to the list (will be reversed later for correct download order)
+          echo "$PARENT_PROJECT_NAME" >> "$PROJECTS_FILE"
+          TEMP_PROJECT_FOR_TRAVERSAL="$PARENT_PROJECT_NAME" # Continue traversal with the found parent
+      done
+
+      # Reverse the projects order for processing
+      ORDERED_PROJECTS_FOR_DOWNLOAD=$(awk '{lines[NR] = $0} END {for (i = NR; i > 0; i--) print lines[i]}' "$PROJECTS_FILE")
+
+      # Apply secrets for each project in the determined order
+      for PROJECT_TO_DOWNLOAD_FROM in $ORDERED_PROJECTS_FOR_DOWNLOAD; do
+          CONFIG_TO_USE=""
+          if [ "$PROJECT_TO_DOWNLOAD_FROM" = "$INITIAL_PROJECT" ]; then
+              # For the initial project (current CI job's project), use its specific DOPPLER_CONFIG
+              CONFIG_TO_USE="$DOPPLER_CONFIG"
+              echo "INFO: Project: $PROJECT_TO_DOWNLOAD_FROM, Config: $CONFIG_TO_USE (Initial Project)"
+          else
+              # For any parent projects in the hierarchy, use DOPPLER_PARENT_CONFIG
+              CONFIG_TO_USE="$DOPPLER_PARENT_CONFIG"
+              echo "INFO: Project: $PROJECT_TO_DOWNLOAD_FROM, Config: $CONFIG_TO_USE (Parent Project)"
+          fi
+          
+          # Download secrets and append to bash.env
+          # The `|| true` ensures the script doesn't fail if a project/config has no secrets or download fails for a specific project in the chain.
+          # Secrets are exported in a format suitable for `source bash.env`.
+          doppler secrets download --no-file --project "$PROJECT_TO_DOWNLOAD_FROM" --config "$CONFIG_TO_USE" \
+          | jq -r 'to_entries[] | "export \(.key)=\(.value | @sh )"' >> bash.env || true 
+          # Note: Added escaped quotes around .value for robustness with complex secret values. @sh should handle it but this is safer.
+      done
+
+      # Cleanup temporary file
+      rm -f "$PROJECTS_FILE"
+      echo "Secrets file bash.env has been populated successfully from the project hierarchy."
+  rules:
+    - if: $CI_COMMIT_TAG
+      when: never
+    - when: always
