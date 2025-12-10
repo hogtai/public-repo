@@ -68,12 +68,30 @@ jobs:
             exit 1
           fi
 
+      - name: Run pipeline performance with retry script
+        env:
+          GITLAB_PROJECT_IDS: ${{ secrets.GITLAB_PROJECT_IDS }}
+          GITLAB_ACCESS_TOKEN: ${{ secrets.GITLAB_ACCESS_TOKEN }}
+        run: |
+          set -euo pipefail
+
+          # Run the script and capture output
+          python python-scripts/gitlab/gitlab_pipeline_performance_with_retry.py 2>&1 | tee script_retry.log
+
+          # If the script logged any ERROR lines, treat this step as a failure.
+          if grep -q "ERROR:" script_retry.log; then
+            echo "One or more ERROR lines were detected in script output. Failing step."
+            exit 1
+          fi
+
       - name: Upload pipeline audit results
         # This will be skipped if the previous step fails
         uses: actions/upload-artifact@v4
         with:
           name: pipeline-audit-results
-          path: pipeline_audit_results_*.zip
+          path: |
+            pipeline_audit_results_*.zip
+            flakiness_analysis_results_*.zip
 
       - name: Send success email
         if: success()
