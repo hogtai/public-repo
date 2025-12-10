@@ -1,0 +1,102 @@
+# Trivy Security Scanning GitLab CI Template
+#
+# This template provides reusable Trivy security scanning jobs for container
+# vulnerability scanning and secret detection that can be included in any
+# GitLab project with containerized applications.
+#
+# Usage:
+#   include:
+#     - project: 'lifechurch/io/digital-product/sre/cicd-tools/trivy'
+#       file: '/.gitlab-ci-template.yml'
+#       ref: 'main'
+#
+# Requirements:
+#   - Container images pushed to GCR (gcr.io)
+#   - CI_REGISTRY_USER and CI_REGISTRY_PASSWORD variables configured
+#   - PROJECT_ID variable defined (GCP project ID)
+#
+# Customization:
+#   Projects should define runner tags in their own .gitlab-ci.yml
+#   using either the 'default' section or by extending the jobs:
+#
+#   Example 1 - Using default tags (applies to all jobs):
+#     default:
+#       tags:
+#         - int-prod
+#
+#   Example 2 - Override specific jobs:
+#     container_scanning:
+#       tags:
+#         - int-prod
+#
+#   Example 3 - Customize image name:
+#     variables:
+#       FULL_IMAGE_NAME: 'gcr.io/my-project/my-app:${CI_COMMIT_SHA}'
+
+stages:
+  - secure
+
+.trivy:
+  image:
+    name: docker.io/aquasec/trivy:latest
+    entrypoint: ['']
+  variables:
+    # No need to clone the repo, we exclusively work on artifacts.  See
+    # https://docs.gitlab.com/ee/ci/runners/README.html#git-strategy
+    GIT_STRATEGY: none
+    TRIVY_USERNAME: '$CI_REGISTRY_USER'
+    TRIVY_PASSWORD: '$CI_REGISTRY_PASSWORD'
+    TRIVY_AUTH_URL: '$CI_REGISTRY'
+    TRIVY_NO_PROGRESS: 'true'
+    TRIVY_CACHE_DIR: '.trivycache/'
+    FULL_IMAGE_NAME: 'gcr.io/${PROJECT_ID}/${CI_PROJECT_NAME}:${CI_COMMIT_SHA}-$CI_PIPELINE_ID'
+  before_script:
+    - trivy --version
+    # cache cleanup is needed when scanning images with the same tags, it does not remove the database
+    - time trivy image --clear-cache
+    # update vulnerabilities db
+    - time trivy image --download-db-only
+  rules:
+    - if: $CI_PIPELINE_SOURCE == "merge_request_event"
+      when: never
+    - if: '$SECURE_ALLOW_FAILURE == "true" '
+      allow_failure: true
+
+container_scanning:
+  extends: .trivy
+  stage: secure
+  script:
+    - time trivy image --format table --report summary --severity CRITICAL,HIGH  "$FULL_IMAGE_NAME" --quiet --scanners vuln  --ignore-unfixed
+    - time trivy image --exit-code 1 --severity CRITICAL,HIGH --format json --list-all-pkgs --output trivy-report-vulns.json "$FULL_IMAGE_NAME" --scanners vuln  --ignore-unfixed
+  cache:
+    paths:
+      - .trivycache/
+  artifacts:
+    paths:
+      - trivy-report-vulns.json
+    reports:
+      container_scanning: trivy-report-vulns.json
+  rules:
+    - if: '$CI_COMMIT_BRANCH == "main" || $CI_COMMIT_BRANCH == "integration"'
+      when: on_success
+      allow_failure: true
+    - when: never
+
+secret_detection:
+  extends: .trivy
+  stage: secure
+  script:
+    - time trivy image --exit-code 1 --severity CRITICAL,HIGH --format json --output trivy-report-secrets.json "$FULL_IMAGE_NAME" --scanners secret --quiet --report summary
+  cache:
+    paths:
+      - .trivycache/
+  artifacts:
+    paths:
+      - trivy-report-secrets.json
+    reports:
+      secret_detection: trivy-report-secrets.json
+  rules:
+    - if: '$CI_COMMIT_BRANCH == "main" || $CI_COMMIT_BRANCH == "integration"'
+      when: on_success
+      allow_failure: true
+    - when: never
