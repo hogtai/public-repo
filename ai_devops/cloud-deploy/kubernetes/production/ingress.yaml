@@ -1,0 +1,39 @@
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: $INGRESS_NAME
+  namespace: $KUBE_NAMESPACE
+  annotations:
+    nginx.ingress.kubernetes.io/proxy-body-size: "10m"
+    cert-manager.io/cluster-issuer: "letsencrypt-prod"
+    nginx.ingress.kubernetes.io/server-alias: $SERVER_ALIAS
+    nginx.ingress.kubernetes.io/limit-rpm: "5"
+    nginx.ingress.kubernetes.io/limit-whitelist: "23.235.32.0/20,43.249.72.0/22,103.244.50.0/24,103.245.222.0/23,103.245.224.0/24,104.156.80.0/20,140.248.64.0/18,140.248.128.0/17,146.75.0.0/17,151.101.0.0/16,157.52.64.0/18,167.82.0.0/17,167.82.128.0/20,167.82.160.0/20,167.82.224.0/20,172.111.64.0/18,185.31.16.0/22,199.27.72.0/21,199.232.0.0/16,205.236.56.0/24,35.188.112.147/32,35.188.62.96/32,34.121.148.153/32,35.232.167.82/32,8.36.116.0/24,8.39.144.0/24,31.186.239.0/24,163.116.128.0/17,162.10.0.0/17,40.119.0.0/28,40.119.7.119/32,34.44.177.149/32"
+    nginx.ingress.kubernetes.io/force-ssl-redirect: "true"
+    nginx.ingress.kubernetes.io/configuration-snippet: |
+      more_set_headers "X-Request-Start: t=${msec}";
+  labels:
+    # Standard labels - follow these patterns, additional labels can be added if needed
+    environment: $DOPPLER_ENVIRONMENT                  # This is our standard, do not change (output pulled from doppler will be either dev_,dev,stg,or prd)
+    gitlab_project: $CI_PROJECT_NAME                   # This is our standard, do not change
+    gitlab_pipeline_id: "$CI_PIPELINE_ID"              # This is our standard, do not change
+    project_owner: web                                 # Select only from one of the following (web, api, sre, data, or rock)
+# Section will be project needs specific
+spec:
+  ingressClassName: nginx
+  rules:
+    - host: $INGRESS_HOSTNAME
+      http:
+        paths:
+          - pathType: ImplementationSpecific
+            path: /
+            backend:
+              service:
+                name: $KUBE_NAMESPACE-service-$CI_COMMIT_REF_SLUG
+                port:
+                  number: 80
+  tls:
+    - hosts:
+        - $INGRESS_HOSTNAME
+      secretName: tls-$INGRESS_HOSTNAME
+      

@@ -1,0 +1,27 @@
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  labels:
+    # Standard labels - follow these patterns, additional labels can be added if needed
+    environment: $DOPPLER_ENVIRONMENT                  # This is our standard, do not change (output pulled from doppler will be either dev_,dev,stg,or prd)
+    gitlab_project: $CI_PROJECT_NAME                   # This is our standard, do not change
+    gitlab_pipeline_id: "$CI_PIPELINE_ID"              # This is our standard, do not change
+    project_owner: web                                 # Select only from one of the following (web, api, sre, data, or rock)
+    tier: backend                                      # Select only from one of the following (frontend, backend, database or job)    
+  name: $KUBE_NAMESPACE-autoscale-$CI_COMMIT_REF_SLUG
+  namespace: $KUBE_NAMESPACE
+# Section will be project needs specific
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: $KUBE_NAMESPACE-app-$CI_COMMIT_REF_SLUG
+  minReplicas: 8
+  maxReplicas: 12
+  metrics:
+  - type: Resource
+    resource:
+      name: cpu
+      target:
+        type: Utilization
+        averageUtilization: 60

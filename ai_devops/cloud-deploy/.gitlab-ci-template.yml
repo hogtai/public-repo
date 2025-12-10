@@ -1,0 +1,403 @@
+include:
+  - project: 'lifechurch/io/digital-product/sre/cicd-tools/doppler'
+    file: '/.gitlab-ci.template.yml'
+    ref: 'main'
+
+stages:
+    - secret
+    - deploy:review
+    - stop:review
+    - deploy:develop
+    - deploy:staging
+    - deploy:production
+
+.cloud_deploy_scripts:
+  before_script:
+    - apt-get update && apt-get install -y gettext
+    - |
+      curl -L -O https://github.com/yannh/kubeconform/releases/latest/download/kubeconform-linux-amd64.tar.gz
+      tar -xvzf kubeconform-linux-amd64.tar.gz && rm kubeconform-linux-amd64.tar.gz
+      mv kubeconform /bin
+      rm LICENSE
+    - | # Load secrets from bash.env
+      echo "Sourcing secrets from bash.env artifact..."
+      set -a
+      source bash.env
+      set +a
+    - printf "%s" "$CLOUD_DEPLOY_GCP_SERVICE_ACCOUNT" > /tmp/gcp-key.json
+    - gcloud auth activate-service-account --key-file=/tmp/gcp-key.json
+    - gcloud config set project "$PROJECT_ID"
+  deploy:
+    # Generate a unique Cloud Deploy release name based on project ID, commit SHA, and timestamp.
+    - |
+      echo "Generating Cloud Deploy release name..."
+      export TRUNCATED_SHA=$(echo "$CI_COMMIT_SHA" | tr '[:upper:]' '[:lower:]' | cut -c1-6)
+      export TIMESTAMP=$(TZ="America/Chicago" date +"%Y%m%d-%H%M")
+      export UNIQUE_RELEASE_NAME="r${CI_PROJECT_ID}-${TRUNCATED_SHA}-${TIMESTAMP}"
+      export CI_COMMIT_BRANCH_ORIGINAL=$CI_COMMIT_BRANCH
+      export CI_COMMIT_BRANCH=$(echo "$CI_COMMIT_BRANCH" | sed 's/[\/\\_]/-/g' | tr '[:upper:]' '[:lower:]')
+      echo "Generated release name: $UNIQUE_RELEASE_NAME"
+    - |
+      echo "Rendering all Kubernetes manifest files from $K8_PATH/..." # Updated directory
+      mkdir -p rendered-manifests
+    # Setup Namespace and Cluster Secret Store
+    - |
+      echo "---" >> rendered-manifests/rendered.yaml # Add YAML separator
+      envsubst "$(env | cut -d= -f1 | sed 's/^/$/' | tr '\n' ' ')" < $K8_PATH/namespace.yaml | sed '1{/^---$/d}; ${/^---$/d}; /^[[:space:]]*$/d' | sed '/^$/N;/^\n$/d' >> rendered-manifests/rendered.yaml && rm $K8_PATH/namespace.yaml
+      echo "" >> rendered-manifests/rendered.yaml
+      echo "---" >> rendered-manifests/rendered.yaml # Add YAML separator
+      envsubst "$(env | cut -d= -f1 | sed 's/^/$/' | tr '\n' ' ')" < $K8_PATH/secretstore.yaml | sed '1{/^---$/d}; ${/^---$/d}; /^[[:space:]]*$/d' | sed '/^$/N;/^\n$/d'>> rendered-manifests/rendered.yaml && rm $K8_PATH/secretstore.yaml
+      echo "" >> rendered-manifests/rendered.yaml
+      for file in $K8_PATH/*; do
+         echo "---" >> rendered-manifests/rendered.yaml # Add YAML separator
+         envsubst "$(env | cut -d= -f1 | sed 's/^/$/' | tr '\n' ' ')" < $file | sed '1{/^---$/d}; ${/^---$/d}; /^[[:space:]]*$/d' | sed '/^$/N;/^\n$/d' >> rendered-manifests/rendered.yaml
+         echo "" >> rendered-manifests/rendered.yaml
+      done
+    - |
+      echo "Validating rendered manifests:"
+      echo "===== 📄 File: rendered.yaml ====="
+      cat "rendered-manifests/rendered.yaml"
+      echo "=================================="
+      cat "rendered-manifests/rendered.yaml" | kubeconform --summary --strict --verbose --output pretty -schema-location default -schema-location 'https://raw.githubusercontent.com/datreeio/CRDs-catalog/main/{{.Group}}/{{.ResourceKind}}_{{.ResourceAPIVersion}}.json' || echo "===== ❌ End of rendered.yaml ====="
+      echo "===== ✅ End of rendered.yaml ====="
+
+    - export CI_COMMIT_BRANCH=$CI_COMMIT_BRANCH_ORIGINAL
+    # Create a new Cloud Deploy release in GCP using the rendered manifest.
+    - |  
+      echo "Creating Cloud Deploy release in GCP..."
+      gcloud deploy releases create "$UNIQUE_RELEASE_NAME" \
+        --delivery-pipeline=$DELIVERY_PIPELINE \
+        --region="$GCP_REGION" \
+        --images=cloud-deploy=us-docker.pkg.dev/${PROJECT_ID}/gcr.io/${CI_PROJECT_NAME}:${CI_COMMIT_SHA}-${CI_PIPELINE_ID} \
+        --from-k8s-manifest=rendered-manifests/rendered.yaml \
+        --gcs-source-staging-dir=gs://cloud_deploy_staging_skaffold_manifests/source
+
+    # Track the status of the Cloud Deploy rollout until it succeeds or fails.
+    - |
+      echo "Waiting for Cloud Deploy rollout to complete..."
+      # Get the ID of the newly created rollout
+      ROLLOUT_ID=$(gcloud deploy rollouts list \
+        --region="$GCP_REGION" \
+        --delivery-pipeline=$DELIVERY_PIPELINE \
+        --release="$UNIQUE_RELEASE_NAME" \
+        --format="value(name)" | head -n1 | awk -F/ '{print $NF}')
+      MAX_WAIT_MINUTES=15
+      WAIT_INTERVAL_SECONDS=30
+      ELAPSED_SECONDS=0
+
+      # Loop to check rollout status
+      while true; do
+      STATUS=$(gcloud deploy rollouts describe "$ROLLOUT_ID" \
+        --region="$GCP_REGION" \
+        --delivery-pipeline=$DELIVERY_PIPELINE \
+        --release="$UNIQUE_RELEASE_NAME" \
+        --format="value(state)")
+
+      echo "Current rollout state: $STATUS"
+
+      if [[ "$STATUS" == "SUCCEEDED" ]]; then
+        echo "✅ Cloud Deploy rollout succeeded!"
+        echo "🎉 $ENVIRONMENT app is available at:"
+        
+        # Check if ingress.yaml exists in the directory
+        if [ -f "$K8_PATH/ingress.yaml" ]; then
+          echo "👉 https://${INGRESS_HOSTNAME} (if connected to the Life.Church network)"
+        else
+          echo "WARNING: no ingress.yaml was not present in the target manifest directory, if no public ingress is needed for this deployment, this warning is safe to ignore, otherwise, please add an ingress.yaml to the targeted kubernetes folder and re-run this pipeline"
+        fi
+        break # Exit loop on success
+      elif [[ "$STATUS" == "FAILED" || "$STATUS" == "CANCELLED" ]]; then
+        echo "❌ Cloud Deploy rollout failed or was cancelled. Fetching logs..."
+        
+        # Get the job run ID from the rollout
+        JOB_RUN_ID=$(gcloud deploy rollouts describe "$ROLLOUT_ID" \
+          --region="$GCP_REGION" \
+          --delivery-pipeline="$DELIVERY_PIPELINE" \
+          --release="$UNIQUE_RELEASE_NAME" \
+          --format="value(phases[0].deploymentJobs.deployJob.jobRun)" | awk -F/ '{print $NF}')
+        
+        # Get the build ID from the job run
+        BUILD_ID=$(gcloud deploy job-runs describe "$JOB_RUN_ID" \
+          --release="$UNIQUE_RELEASE_NAME" \
+          --delivery-pipeline="$DELIVERY_PIPELINE" \
+          --region="$GCP_REGION" \
+          --rollout="$ROLLOUT_ID" \
+          --format="value(deployJobRun.build)" | awk -F/ '{print $NF}')
+        
+        # Get the actual deployment logs
+        echo "📋 Deployment logs:"
+        gcloud builds log --region="$GCP_REGION" \
+          --project="$PROJECT_ID" \
+          "$BUILD_ID"
+          
+        exit 1
+      fi
+
+      # Check for timeout
+      if [[ "$ELAPSED_SECONDS" -ge $((MAX_WAIT_MINUTES * 60)) ]]; then
+        echo "❌ Timeout reached waiting for rollout to succeed. This often means that the application deployed in a failed state and never became healthy. Double Check your environment and configuration values. Or view the release rollout log in the int-staging cloud deploy delivery pipeline for more details."
+        exit 1 # Exit job on timeout
+      fi
+
+      sleep $WAIT_INTERVAL_SECONDS # Wait before checking status again
+      ELAPSED_SECONDS=$((ELAPSED_SECONDS + WAIT_INTERVAL_SECONDS))
+      done
+  destroy:
+    # Display contents of the rendered manifest file
+    - echo "📄 Displaying rendered resources from deploy:$ENVIRONMENT artifact:"
+    - cat rendered-manifests/rendered.yaml
+
+    # Extract and delete only specified resource kinds from the manifest
+    - |
+      echo "🛠️ Pre-processing rendered-manifests/rendered.yaml from the deploy:$ENVIRONMENT job to ensure only targeted $ENVIRONMENT app resources get deleted from the cluster..."
+
+      awk '
+        /^apiVersion:/ {
+          if (NR > 1 && prev_line != "---") {
+            print "---"
+          }
+        }
+        {
+          print
+          prev_line = $0
+        }
+      ' rendered-manifests/rendered.yaml > rendered-manifests/rendered.processed.yaml
+    - |
+      # Display the processed file for debugging
+      echo "📄 The following $ENVIRONMENT app resources will be deleted from the cluster:"
+      cat rendered-manifests/rendered.processed.yaml
+
+      # Extract and delete only specified resource kinds from the manifest
+      echo "🧼 Deleting only relevant $ENVIRONMENT app resources from the cluster..."
+
+      # Define list of kinds we want to delete
+      TARGET_KINDS="Deployment ExternalSecret HorizontalPodAutoscaler Ingress Service ReplicaSet Pod ClusterSecretStore"
+
+      # Split the manifest into individual documents and filter by kind
+      # Use the processed file for csplit
+      csplit -z -f doc rendered-manifests/rendered.processed.yaml '/^---$/' '{*}'
+
+      DELETION_ISSUES=0 # Track if any deletions fail or names can't be found
+
+        for file in doc*; do
+          # Skip if not a regular file (avoid directories)
+          if [[ ! -f "$file" ]]; then
+            continue
+          fi
+          KIND=$(awk '/^kind:/ { print $2; exit }' "$file")
+          
+          # Extract NAME from metadata
+          # This awk script looks for 'name:' within the first metadata block and extracts its value. for targeted deletion
+          # It then uses xargs to trim any leading/trailing whitespace from the extracted name.
+          TEMP_NAME=$(awk '
+            BEGIN { in_metadata=0 }
+            /^metadata:/ { in_metadata=1; next }
+            # Exit if we hit spec before finding name in metadata, or after processing metadata for the current resource.
+            /^spec:/ { if(in_metadata) exit; } 
+            in_metadata && /^[[:space:]]*name:[[:space:]]/ {
+              current_line = $0; # Work on a copy of the line
+              sub(/^[[:space:]]*name:[[:space:]]*/, "", current_line); # Remove " name: " part
+              print current_line; # Print the rest of the line (the name value)
+              exit; # Found the name for this document component
+            }
+          ' "$file")
+          NAME=$(echo "$TEMP_NAME" | xargs) # xargs trims leading/trailing whitespace
+
+          if [[ -z "$KIND" ]]; then
+            echo "⚠️ Could not determine KIND for file $file. Skipping. Content:"
+            head -n 10 "$file" # Print first 10 lines for context
+            DELETION_ISSUES=1
+            continue
+          fi
+
+          if echo "$TARGET_KINDS" | grep -qw "$KIND"; then
+            if [[ -z "$NAME" ]]; then
+              echo "⚠️ Could not determine NAME for $KIND in file $file. Skipping deletion. Content:"
+              head -n 10 "$file" # Print first 10 lines for context
+              DELETION_ISSUES=1
+              continue
+            fi
+            
+            echo "🔻 Deleting $KIND $NAME in namespace $KUBE_NAMESPACE"
+            if [[ "$KIND" == "ClusterSecretStore" ]]; then
+              if kubectl delete "$KIND" "$NAME" --ignore-not-found; then
+                echo "✅ Successfully deleted $KIND $NAME (or it was already gone from the cluster)."
+              else
+                KUBECTL_EXIT_CODE=$?
+                echo "❌ Error deleting $KIND $NAME. Kubectl exit code: $KUBECTL_EXIT_CODE."
+                DELETION_ISSUES=1
+              fi
+            elif kubectl delete "$KIND" "$NAME" -n "$KUBE_NAMESPACE" --ignore-not-found; then
+              echo "✅ Successfully deleted $KIND $NAME (or it was already gone from the cluster)."
+            else
+              KUBECTL_EXIT_CODE=$?
+              echo "❌ Error deleting $KIND $NAME. Kubectl exit code: $KUBECTL_EXIT_CODE."
+              DELETION_ISSUES=1
+            fi
+          fi
+        done
+
+      # After the loop, report if there were any issues
+      if [[ "$DELETION_ISSUES" -ne 0 ]]; then
+        echo "⚠️ There were issues during the deletion process. Some resources may not have been deleted correctly."
+        # The job will likely fail due to `set -e` if kubectl had a hard error and it wasn't caught.
+        # This message provides a summary as requested.
+      fi
+
+      # Clean up temporary doc files and processed manifest
+      echo "🧹 Cleaning up temporary files..."
+      rm -f doc* || true
+      rm -rf doc || true
+      rm -f rendered-manifests/rendered.processed.yaml || true
+
+      # Final check to ensure resources are removed
+      echo "🔍 Following the deletion of the $ENVIRONMENT app, here is the final resource state in namespace $KUBE_NAMESPACE: on the cluster"
+      kubectl get all -n "$KUBE_NAMESPACE"
+      kubectl get externalsecret -n "$KUBE_NAMESPACE" || echo "No ExternalSecrets found"
+      kubectl get hpa -n "$KUBE_NAMESPACE" || echo "No HPAs found"
+      kubectl get ingress -n "$KUBE_NAMESPACE" || echo "No Ingresses found"
+
+      # Deletes the $ENVIRONMENT App Dopper Config
+      echo "🔧 Installing Doppler CLI for config cleanup..."
+      curl -Ls https://cli.doppler.com/install.sh | sh
+      export PATH="$PATH:/root/.doppler"
+    - !reference [.doppler_scripts, delete_feature_config]
+
+
+deploy:review:
+  stage: deploy:review
+  image: google/cloud-sdk:latest
+  dependencies: [secret]
+  variables:
+    K8_PATH: ./kubernetes/review
+    DELIVERY_PIPELINE: int-staging
+    GCP_REGION: us-central1
+    GCP_PROJECT: lc-interactive
+    ENVIRONMENT: review
+  before_script:
+    - echo "Cloud Deploy CD - Deploying your Review App into Kubernetes (Staging), Pulling in Doppler Secrets and Connecting to GCP"
+    - !reference [.cloud_deploy_scripts, before_script]
+  script:
+    - !reference [.cloud_deploy_scripts, deploy]
+
+  rules:
+    - if: '$CI_COMMIT_REF_NAME != "main" && $CI_COMMIT_REF_NAME != "master" && $CI_COMMIT_REF_NAME != "staging" && $CI_COMMIT_REF_NAME != "integration" && $CI_COMMIT_REF_NAME != "develop"'
+      when: on_success
+    - when: never
+  tags:
+    - int-staging
+  allow_failure: true
+  artifacts:
+    name: "rendered-manifests-$CI_COMMIT_REF_NAME"
+    paths:
+      - rendered-manifests/rendered.yaml
+    expire_in: 31 days
+    when: always
+
+stop:review:
+  stage: stop:review
+  image: google/cloud-sdk:latest
+  dependencies: [secret, deploy:review] # Ensure we get the rendered manifest artifact from the deploy:review job and doppler secrets from secrets job
+  variables:
+    K8_PATH: ./kubernetes/review
+    DELIVERY_PIPELINE: int-staging
+    GCP_REGION: us-central1
+    GCP_PROJECT: lc-interactive
+    ENVIRONMENT: review
+  before_script:
+    - echo "🛑 Stopping review app for ${CI_ENVIRONMENT_NAME}..."
+    - echo "Sourcing secrets from bash.env artifact..."
+    - set -a
+    - source bash.env
+    - set +a
+    - printf "%s" "$CLOUD_DEPLOY_GCP_SERVICE_ACCOUNT" > /tmp/gcp-key.json
+    - gcloud auth activate-service-account --key-file=/tmp/gcp-key.json
+    - gcloud config set project "$PROJECT_ID"
+    - gcloud container clusters get-credentials "$GKE_CLUSTER_NAME" --region="$GCP_REGION"
+  script:
+    - !reference [.cloud_deploy_scripts, destroy]
+  rules:
+    - if: '$CI_COMMIT_REF_NAME != "main" && $CI_COMMIT_REF_NAME != "master" && $CI_COMMIT_REF_NAME != "staging" && $CI_COMMIT_REF_NAME != "integration" && $CI_COMMIT_REF_NAME != "develop"'
+      when: manual
+    - if: '$CI_COMMIT_REF_NAME != "main" && $CI_COMMIT_REF_NAME != "master" && $CI_COMMIT_REF_NAME != "staging" && $CI_COMMIT_REF_NAME != "integration" && $CI_COMMIT_REF_NAME != "develop" && $CI_PIPELINE_SOURCE == "schedule"'
+      when: on_success
+    - when: never
+  tags:
+    - int-staging
+  allow_failure: false
+  artifacts:
+    paths:
+      - rendered-manifests/rendered.yaml
+    expire_in: 31 days
+
+deploy:develop:
+  stage: deploy:develop
+  image: google/cloud-sdk:latest
+  dependencies: [secret]
+  variables:
+    K8_PATH: ./kubernetes/development
+    DELIVERY_PIPELINE: int-staging
+    GCP_REGION: us-central1
+    GCP_PROJECT: lc-interactive
+    ENVIRONMENT: development
+  before_script:
+    - echo "Cloud Deploy CD - Deploying your Application into Kubernetes (Staging), Pulling in Doppler Secrets and Connecting to GCP"
+    - !reference [.cloud_deploy_scripts, before_script]
+
+  script:
+    - !reference [.cloud_deploy_scripts, deploy]
+  only:
+    - develop
+  tags:
+    - int-staging
+  environment:
+    name: develop
+  allow_failure: false
+
+deploy:staging:
+  stage: deploy:staging
+  image: google/cloud-sdk:latest
+  dependencies: [secret]
+  variables:
+    K8_PATH: ./kubernetes/staging
+    DELIVERY_PIPELINE: int-staging
+    GCP_REGION: us-central1
+    GCP_PROJECT: lc-interactive
+    ENVIRONMENT: staging
+  before_script:
+    - echo "Cloud Deploy CD - Deploying your Application into Kubernetes (Staging), Pulling in Doppler Secrets and Connecting to GCP"
+    - !reference [.cloud_deploy_scripts, before_script]
+  script:
+    - !reference [.cloud_deploy_scripts, deploy]
+  only:
+    - staging
+    - integration
+  tags:
+    - int-staging
+  environment:
+    name: staging
+  allow_failure: false
+
+deploy:production:
+  stage: deploy:production
+  image: google/cloud-sdk:latest
+  dependencies: [secret]
+  variables:
+    K8_PATH: ./kubernetes/production
+    DELIVERY_PIPELINE: int-production
+    GCP_REGION: us-central1
+    GCP_PROJECT: lc-interactive
+    ENVIRONMENT: production
+  before_script:
+    - echo "Cloud Deploy CD - Deploying your Application into Kubernetes (Production), Pulling in Doppler Secrets and Connecting to GCP"
+    - !reference [.cloud_deploy_scripts, before_script]
+  script:
+    - !reference [.cloud_deploy_scripts, deploy]
+  only:
+    - main
+  tags:
+    - int-prod
+  environment:
+    name: production
+  allow_failure: false
+  when: manual

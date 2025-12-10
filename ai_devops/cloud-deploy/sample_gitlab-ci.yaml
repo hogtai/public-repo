@@ -1,0 +1,14 @@
+# Add the following sections to your .gitlab-ci.yaml file within your gitlab project to integrate Cloud Deploy for your application.
+# In many cases, existing projects will already have the 'includes', 'variables', and 'stages' sections you can add this config to
+
+include:
+  - project: 'lifechurch/io/digital-product/sre/cicd-tools/cloud-deploy' # For CD into our infrastructure
+    file: '/.gitlab-ci-template.yml'
+    ref: 'main' 
+
+stages:
+  - deploy:review        
+  - stop:review          
+  - deploy:develop       
+  - deploy:staging
+  - deploy:production

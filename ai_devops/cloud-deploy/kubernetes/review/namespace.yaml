@@ -1,0 +1,10 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: $KUBE_NAMESPACE
+  labels:
+    # Standard labels - follow these patterns, additional labels can be added if needed
+    environment: $DOPPLER_ENVIRONMENT                  # This is our standard, do not change (output pulled from doppler will be either dev_,dev,stg,or prd)
+    gitlab_project: $CI_PROJECT_NAME                   # This is our standard, do not change
+    gitlab_pipeline_id: "$CI_PIPELINE_ID"              # This is our standard, do not change
+    project_owner: web                                 # Select only from one of the following (web, api, sre, data, or rock)
