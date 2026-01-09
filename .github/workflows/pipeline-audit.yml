@@ -2,10 +2,10 @@ name: GitLab Pipeline Performance Audit
 
 on:
   workflow_dispatch: # Allows manual triggering from the GitHub UI
-  schedule:
+  #schedule:
     # Every Friday at 06:00 UTC
     # This is midnight CST / 1am CDT in America/Chicago
-    - cron: '0 6 * * 5'
+  # - cron: '0 6 * * 5'
 
 jobs:
   run-audit:
